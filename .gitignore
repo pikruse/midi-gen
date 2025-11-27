@@ -1,5 +1,7 @@
 *.mid
 *.pyc
 tmp/*
+checkpoints/*
+wandb/*
 .DS_Store
 __pycache__/
