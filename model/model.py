@@ -146,6 +146,7 @@ class MidiTransformer(nn.Module):
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
         device: torch.device = torch.device('cpu'),
+        batch_size: int = 1,
     ) -> torch.Tensor:
         """
         Autoregressive generation starting from BOS token.
@@ -158,14 +159,18 @@ class MidiTransformer(nn.Module):
             top_k: If set, only sample from top-k tokens
             top_p: If set, use nucleus sampling with this probability mass
             device: Device to generate on
+            batch_size: Number of sequences to generate in parallel
             
         Returns:
-            generated: Generated token IDs (1, seq_len)
+            generated: Generated token IDs (batch_size, seq_len)
         """
         self.eval()
         
-        # Start with BOS token
-        generated = torch.tensor([[bos_id]], dtype=torch.long, device=device)
+        # Start with BOS token for each sequence in batch
+        generated = torch.full((batch_size, 1), bos_id, dtype=torch.long, device=device)
+        
+        # Track which sequences have finished (generated EOS)
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
         
         for _ in range(max_len - 1):
             # Forward pass
@@ -176,33 +181,40 @@ class MidiTransformer(nn.Module):
             
             # Apply top-k filtering
             if top_k is not None:
-                indices_to_remove = next_logits < torch.topk(next_logits, top_k)[0][..., -1, None]
+                top_k_values = torch.topk(next_logits, top_k, dim=-1)[0]
+                indices_to_remove = next_logits < top_k_values[:, -1, None]
                 next_logits[indices_to_remove] = float('-inf')
             
             # Apply top-p (nucleus) filtering
             if top_p is not None:
-                sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
+                sorted_logits, sorted_indices = torch.sort(next_logits, descending=True, dim=-1)
                 cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
                 
                 # Remove tokens with cumulative probability above threshold
                 sorted_indices_to_remove = cumulative_probs > top_p
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0
+                sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+                sorted_indices_to_remove[:, 0] = 0
                 
-                indices_to_remove = sorted_indices_to_remove.scatter(
-                    dim=-1, index=sorted_indices, src=sorted_indices_to_remove
-                )
+                # Scatter back to original indices
+                indices_to_remove = torch.zeros_like(next_logits, dtype=torch.bool)
+                indices_to_remove.scatter_(dim=-1, index=sorted_indices, src=sorted_indices_to_remove)
                 next_logits[indices_to_remove] = float('-inf')
             
             # Sample next token
             probs = F.softmax(next_logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             
+            # For finished sequences, replace with EOS (or pad)
+            next_token[finished] = eos_id
+            
             # Append to sequence
             generated = torch.cat([generated, next_token], dim=1)
             
-            # Stop if EOS generated
-            if next_token.item() == eos_id:
+            # Update finished status
+            finished = finished | (next_token.squeeze(-1) == eos_id)
+            
+            # Stop if all sequences have finished
+            if finished.all():
                 break
         
         return generated

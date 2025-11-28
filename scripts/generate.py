@@ -1,6 +1,7 @@
 import torch
 import sys
 from pathlib import Path
+from typing import List, Tuple
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -11,24 +12,30 @@ from model.model import MidiTransformer
 
 def generate_midi(
     checkpoint_path: str,
-    output_path: str = "../data/output/generated.mid",
+    output_path: str = "data/output/generated.mid",
+    num_samples: int = 1,
     max_len: int = 512,
     temperature: float = 1.0,
     top_k: int = None,
     top_p: float = None,
     device: str = "auto",
-):
+) -> List[Tuple[List[int], object]]:
     """
-    Generate a MIDI file using a trained model.
+    Generate MIDI file(s) using a trained model.
     
     Args:
         checkpoint_path: Path to model checkpoint
-        output_path: Path to save generated MIDI file
+        output_path: Path to save generated MIDI file(s). For multiple samples,
+                     files are named with suffix _0, _1, etc.
+        num_samples: Number of MIDI files to generate in parallel
         max_len: Maximum number of tokens to generate
         temperature: Sampling temperature (higher = more random)
         top_k: If set, only sample from top-k tokens
         top_p: If set, use nucleus sampling
         device: Device to run on
+        
+    Returns:
+        List of (token_ids, midi_object) tuples
     """
     # Set device
     if device == "auto":
@@ -60,10 +67,10 @@ def generate_midi(
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
-    print(f"Generating (max_len={max_len}, temp={temperature}, top_k={top_k}, top_p={top_p})...")
+    print(f"Generating {num_samples} sample(s) (max_len={max_len}, temp={temperature}, top_k={top_k}, top_p={top_p})...")
     
-    # Generate tokens
-    generated_ids = model.generate(
+    # Generate tokens (batch)
+    generated_batch = model.generate(
         bos_id=bos_id,
         eos_id=eos_id,
         max_len=max_len,
@@ -71,28 +78,49 @@ def generate_midi(
         top_k=top_k,
         top_p=top_p,
         device=device,
+        batch_size=num_samples,
     )
     
-    # Remove BOS and EOS tokens for decoding
-    generated_ids = generated_ids[0].tolist()  # (seq_len,)
-    if generated_ids[0] == bos_id:
-        generated_ids = generated_ids[1:]
-    if generated_ids[-1] == eos_id:
-        generated_ids = generated_ids[:-1]
-    
-    print(f"Generated {len(generated_ids)} tokens")
-    
-    # Decode tokens to MIDI
-    midi = tokenizer.decode(generated_ids)
-    
-    # Save MIDI file
+    results = []
     output_path = Path(output_path)
     output_path.parent.mkdir(exist_ok=True)
-    midi.dump_midi(output_path)
     
-    print(f"Saved MIDI to: {output_path}")
+    for i in range(num_samples):
+        # Get this sample's tokens
+        generated_ids = generated_batch[i].tolist()
+        
+        # Remove BOS and EOS tokens for decoding
+        if generated_ids[0] == bos_id:
+            generated_ids = generated_ids[1:]
+        # Remove EOS and everything after
+        if eos_id in generated_ids:
+            eos_idx = generated_ids.index(eos_id)
+            generated_ids = generated_ids[:eos_idx]
+        
+        print(f"Sample {i+1}: Generated {len(generated_ids)} tokens")
+        
+        # Filter out any invalid token IDs (outside vocab range)
+        valid_ids = [id for id in generated_ids if 0 <= id < vocab_size]
+        if len(valid_ids) != len(generated_ids):
+            print(f"  Warning: Filtered out {len(generated_ids) - len(valid_ids)} invalid tokens")
+            generated_ids = valid_ids
+        
+        # Decode tokens to MIDI (wrap in list for batch dimension)
+        midi = tokenizer.decode([generated_ids])
+        
+        # Determine output filename
+        if num_samples == 1:
+            sample_path = output_path
+        else:
+            sample_path = output_path.parent / f"{output_path.stem}_{i}{output_path.suffix}"
+        
+        # Save MIDI file
+        midi.dump_midi(sample_path)
+        print(f"  Saved to: {sample_path}")
+        
+        results.append((generated_ids, midi))
     
-    return generated_ids, midi
+    return results
 
 
 if __name__ == "__main__":
@@ -100,7 +128,8 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Generate MIDI with trained model")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
-    parser.add_argument("--output", type=str, default="../data/output/generated.mid")
+    parser.add_argument("--output", type=str, default="data/output/generated.mid")
+    parser.add_argument("--num_samples", "-n", type=int, default=1, help="Number of samples to generate")
     parser.add_argument("--max_len", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=None)
@@ -112,6 +141,7 @@ if __name__ == "__main__":
     generate_midi(
         checkpoint_path=args.checkpoint,
         output_path=args.output,
+        num_samples=args.num_samples,
         max_len=args.max_len,
         temperature=args.temperature,
         top_k=args.top_k,

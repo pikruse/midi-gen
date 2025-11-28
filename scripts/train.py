@@ -218,7 +218,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default=default_data_path)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=4)
     parser.add_argument("--n_layers", type=int, default=4)
